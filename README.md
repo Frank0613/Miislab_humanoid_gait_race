@@ -3,49 +3,92 @@
 An installable downstream Isaac Lab task package with a standard uv `src` layout.
 
 The registered tasks are:
-- `MiislabHumanoidGaitRace-Humanoid-Gait-Race-G1-Direct`
-
-## Implement the Task
-
-This project contains task scaffolding. Before running or training, replace `MISSING` configuration values and
-implement functions that raise `NotImplementedError`. Define the scene and robot assets, physics and timing,
-action and observation spaces, rewards, termination conditions, and reset behavior. Manager-based task terms live
-in the family's `mdp` package. Define assets in the scene configuration; direct environments inherit scene creation
-from the framework. If AMP is selected, implement reference-motion collection as well. Direct AMP tasks must also
-update observation history and supply `self.extras["amp_obs"]` on every step.
-
-Registrations and agent configurations are provided so you can build on the same structure as the runnable example.
+- `Miislab-Humanoid-Gait-Race-G1-Direct-v1`: velocity-tracking locomotion on rough terrain, used for training
+- `Miislab-Humanoid-Gait-Rl-G1-Race-Final`: race of trained policies on an obstacle course, see [Race](#race)
+- `Miislab-Humanoid-Gait-Rl-G1-Race-Midterm`: the same race on a flat track without obstacles, a straight sprint
 
 ## Installation
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then create the project environment. The default
-environment uses the Newton backend and does not install Isaac Sim:
+Tested on Ubuntu with an NVIDIA RTX 4080 (driver 580), uv 0.13 and Python 3.12. The project expects an Isaac Lab
+v3.0.0 checkout two directories up, at `../../isaac/IsaacLab-3.0.0` (see `[tool.uv.sources]` in `pyproject.toml`), so
+the commands below use `~/isaac` and `~/codes`. Run them in order on a new machine:
 
 ```bash
-uv sync
+# 1. uv (skip if `uv --version` already works), then open a new shell or source the env file it prints
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 2. Isaac Lab v3.0.0, next to this project
+mkdir -p ~/isaac ~/codes
+git clone --branch v3.0.0 --depth 1 https://github.com/isaac-sim/IsaacLab.git ~/isaac/IsaacLab-3.0.0
+
+# 3. this project
+git clone <this-repo-url> ~/codes/Miislab_humanoid_gait_race
+cd ~/codes/Miislab_humanoid_gait_race
+
+# 4. the environment: Python 3.12, Isaac Lab, Newton, Isaac Sim and skrl, as pinned in uv.lock
+uv sync --locked
+
+# 5. check: the three tasks are registered
+uv run pytest
+uv run isaaclab list_envs
+
+# 6. the checkpoints to race go in models/ (git-ignored), then race
+mkdir -p models
+cp /path/to/*.pt models/
+uv run python scripts/race.py models/a.pt models/b.pt --task midterm --viz kit
 ```
 
-This project's `pyproject.toml` uses editable relative paths to an Isaac Lab source checkout. Update
-`[tool.uv.sources]` if either directory moves.
+The first `uv sync` downloads several GB. The first Isaac Sim start asks you to accept the NVIDIA Omniverse EULA; set
+`OMNI_KIT_ACCEPT_EULA=YES` to accept it without the prompt. The first race also downloads the guard rail and other
+SimReady assets and caches them. If Isaac Lab lives somewhere else, change the paths in `[tool.uv.sources]` and run
+`uv lock` before `uv sync`.
 
-The project forwards every optional extra declared by the Isaac Lab package used to create it, including physics,
-rendering, visualizer, RL, teleoperation, and development features. Inspect `pyproject.toml` for the complete list and
-pass each required extra to `uv run`:
+## Race
+
+`scripts/race.py` puts one G1 per checkpoint in its own lane of a straight 30 m course. Yellow SimReady guard rails
+(`Rail_Guard_A09`) separate the lanes; the robots start under a red and white arch with a START banner, which widens
+with the number of lanes, and finish on a checkered line under a FINISH gantry. Between start and finish, every lane
+crosses the same obstacles, made like the training terrain: random rough ground, stairs up, boxes, stairs down and a
+slope. Each robot is named after its checkpoint file. When the races are over the simulation window closes and the
+ranking is printed.
+
+There are two races on the same track: the final (`--task final`, the default) with the obstacles, and the midterm
+(`--task midterm`) without them, a straight sprint on flat ground.
 
 ```bash
-# Standalone OV PhysX
-uv run --extra ovphysx isaaclab random_agent --task <TASK_NAME> physics=ovphysx
-
-# Isaac Sim with PhysX and RTX rendering
-uv run --extra isaacsim isaaclab random_agent --task <TASK_NAME> physics=isaacsim_physx
-
-# Isaac Sim with the Rerun visualizer
-uv run --extra isaacsim --extra rerun isaaclab random_agent --task <TASK_NAME> --viz rerun
+uv run python scripts/race.py models/a.pt models/b.pt models/c.pt --viz kit
+uv run python scripts/race.py models/a.pt models/b.pt --task midterm --viz kit
+uv run python scripts/race.py models/a.pt models/b.pt --viz newton --difficulty 0.7 --rounds 3 --real-time
+uv run python scripts/race.py models/a.pt models/b.pt --obstacles        # flat track
+uv run python scripts/race.py models/a.pt models/b.pt --obstacles stairs_up stairs_up slope
 ```
 
-The `all` extra forwards Isaac Lab's `all` selection. The `ov` extra installs both the `ovphysx` and `ovrtx` runtimes;
-you can also select either independently. Commit `pyproject.toml` and `uv.lock` so collaborators use the same
-environment.
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--task` | `final` | `final` (obstacles), `midterm` (flat track) or a task id |
+| `--difficulty` | 0.4 | obstacle difficulty from 0 to 1, as the training terrain levels (stairs 5-23 cm, boxes 5-20 cm, slopes 0-0.4) |
+| `--obstacles` | `rough stairs_up boxes stairs_down slope` (final), none (midterm) | obstacles from start to finish; none for a flat track |
+| `--course_seed` | 0 | seed of the random rough ground and boxes |
+| `--track_length` | 30 | start-to-finish distance [m] |
+| `--lane_width` | 3.0 | distance between guard rails [m] |
+| `--time_limit` | 120 | race time limit [s] |
+| `--speed` | 1.0 | forward-velocity command of every robot [m/s] |
+| `--rounds` | 1 | number of races before the window closes |
+
+Rules:
+
+- Every robot gets the same forward command and the same target heading, straight down the track toward the finish
+  line; a robot that drifts sideways is not steered back to its lane center. A robot that turned away is always
+  steered back the way it came, so it does not spin on in full circles, and turns in place while it faces more than
+  90 degrees away from the track.
+- The height scan does not see the guard rails (the policy never met walls in training): they only stop a robot
+  that walks into them. Walking into a rail while upright is not a fall: the robot races on from where it is.
+- A robot whose torso touches anything restarts 1 m before the obstacle where it fell, and its clock keeps running.
+- A robot that crosses the finish line stops. The race ends when every robot has finished or the time limit is
+  reached. Finishers are ranked by time, the others by the farthest point they reached.
+
+All checkpoints must come from the agent configuration of this task (same network shape). Put the checkpoints before
+`--obstacles`, which takes a list.
 
 ## Run the tasks
 

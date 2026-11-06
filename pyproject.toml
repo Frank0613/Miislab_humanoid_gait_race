@@ -18,7 +18,7 @@ authors = [
 ]
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "isaaclab-dev[skrl]",
+    "isaaclab-dev[skrl,isaacsim]",
 ]
 
 [project.entry-points."isaaclab.tasks"]
@@ -39,7 +39,7 @@ rl-games = ["isaaclab-dev[rl-games]"]
 rlinf = ["isaaclab-dev[rlinf]"]
 rsl-rl = ["isaaclab-dev[rsl-rl]"]
 sb3 = ["isaaclab-dev[sb3]"]
-skrl = ["isaaclab-dev[skrl]"]
+skrl = ["isaaclab-dev[skrl,isaacsim]"]
 skrl-jax = ["isaaclab-dev[skrl-jax]"]
 teleop = ["isaaclab-dev[teleop]"]
 test = ["isaaclab-dev[test]"]

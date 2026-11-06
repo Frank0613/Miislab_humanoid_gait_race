@@ -13,9 +13,19 @@ import Miislab_humanoid_gait_race.tasks  # noqa: F401
 def test_task_registrations():
     """The project tasks must expose valid environment and agent entry points."""
     expected = {
-        "MiislabHumanoidGaitRace-Humanoid-Gait-Race-G1-Direct": {
+        "Miislab-Humanoid-Gait-Race-G1-Direct-v1": {
             "entry_point": "Miislab_humanoid_gait_race.tasks.humanoid_gait_race_direct.config.g1.env:HumanoidGaitRaceEnv",
             "env_cfg_entry_point": "Miislab_humanoid_gait_race.tasks.humanoid_gait_race_direct.config.g1.env_cfg:HumanoidGaitRaceEnvCfg",
+            "default_agent": "skrl",
+        },
+        "Miislab-Humanoid-Gait-Rl-G1-Race-Final": {
+            "entry_point": "Miislab_humanoid_gait_race.tasks.humanoid_gait_race_direct.config.g1.race_env:HumanoidGaitRaceTrackEnv",
+            "env_cfg_entry_point": "Miislab_humanoid_gait_race.tasks.humanoid_gait_race_direct.config.g1.race_env_cfg:HumanoidGaitRaceTrackEnvCfg",
+            "default_agent": "skrl",
+        },
+        "Miislab-Humanoid-Gait-Rl-G1-Race-Midterm": {
+            "entry_point": "Miislab_humanoid_gait_race.tasks.humanoid_gait_race_direct.config.g1.race_env:HumanoidGaitRaceTrackEnv",
+            "env_cfg_entry_point": "Miislab_humanoid_gait_race.tasks.humanoid_gait_race_direct.config.g1.race_env_cfg:HumanoidGaitRaceTrackMidtermEnvCfg",
             "default_agent": "skrl",
         },
     }
