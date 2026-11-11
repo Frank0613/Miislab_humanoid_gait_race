@@ -6,6 +6,7 @@ The registered tasks are:
 - `Miislab-Humanoid-Gait-Race-G1-Direct-v1`: velocity-tracking locomotion on rough terrain, used for training
 - `Miislab-Humanoid-Gait-Rl-G1-Race-Final`: race of trained policies on an obstacle course, see [Race](#race)
 - `Miislab-Humanoid-Gait-Rl-G1-Race-Midterm`: the same race on a flat track without obstacles, a straight sprint
+- `Miislab-Humanoid-Gait-Rl-G1-Race-Midterm-Plus`: the same track with rough ground (bumps up to 15 cm) from start to finish, no stairs
 
 ## Installation
 
@@ -45,19 +46,21 @@ SimReady assets and caches them. If Isaac Lab lives somewhere else, change the p
 
 ## Race
 
-`scripts/race.py` puts one G1 per checkpoint in its own lane of a straight 30 m course. Yellow SimReady guard rails
+`scripts/race.py` puts one G1 per checkpoint in its own lane of a straight 100 m course. Yellow SimReady guard rails
 (`Rail_Guard_A09`) separate the lanes; the robots start under a red and white arch with a START banner, which widens
 with the number of lanes, and finish on a checkered line under a FINISH gantry. Between start and finish, every lane
 crosses the same obstacles, made like the training terrain: random rough ground, stairs up, boxes, stairs down and a
-slope. Each robot is named after its checkpoint file. When the races are over the simulation window closes and the
+slope. Each robot is named after its checkpoint file, and the name floats above it in the visualizer. When the races are over the simulation window closes and the
 ranking is printed.
 
-There are two races on the same track: the final (`--task final`, the default) with the obstacles, and the midterm
-(`--task midterm`) without them, a straight sprint on flat ground.
+There are three races on the same track: the final (`--task final`, the default) with the obstacles, the midterm
+(`--task midterm`) without them, a straight sprint on flat ground, and the midterm-plus (`--task midterm-plus`) with
+rough ground over the whole track, bumpier than the final's (2-15 cm instead of 2-10 cm), and no stairs.
 
 ```bash
 uv run python scripts/race.py models/a.pt models/b.pt models/c.pt --viz kit
 uv run python scripts/race.py models/a.pt models/b.pt --task midterm --viz kit
+uv run python scripts/race.py models/a.pt models/b.pt --task midterm-plus --viz kit
 uv run python scripts/race.py models/a.pt models/b.pt --viz newton --difficulty 0.7 --rounds 3 --real-time
 uv run python scripts/race.py models/a.pt models/b.pt --obstacles        # flat track
 uv run python scripts/race.py models/a.pt models/b.pt --obstacles stairs_up stairs_up slope
@@ -65,15 +68,16 @@ uv run python scripts/race.py models/a.pt models/b.pt --obstacles stairs_up stai
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--task` | `final` | `final` (obstacles), `midterm` (flat track) or a task id |
+| `--task` | `final` | `final` (obstacles), `midterm` (flat track), `midterm-plus` (rough all the way) or a task id |
 | `--difficulty` | 0.4 | obstacle difficulty from 0 to 1, as the training terrain levels (stairs 5-23 cm, boxes 5-20 cm, slopes 0-0.4) |
-| `--obstacles` | `rough stairs_up boxes stairs_down slope` (final), none (midterm) | obstacles from start to finish; none for a flat track |
+| `--obstacles` | `rough stairs_up boxes stairs_down slope` (final), none (midterm), `rough` over the whole track (midterm-plus) | obstacles from start to finish; none for a flat track |
 | `--course_seed` | 0 | seed of the random rough ground and boxes |
-| `--track_length` | 30 | start-to-finish distance [m] |
+| `--track_length` | 100 | start-to-finish distance [m] |
 | `--lane_width` | 3.0 | distance between guard rails [m] |
-| `--time_limit` | 120 | race time limit [s] |
+| `--time_limit` | 300 | race time limit [s] |
 | `--speed` | 1.0 | forward-velocity command of every robot [m/s] |
 | `--rounds` | 1 | number of races before the window closes |
+| `--fixed_camera` | off | keep the camera at the start; by default it follows the robots from the side, looking down, and keeps every robot still racing in view |
 
 Rules:
 
@@ -83,9 +87,10 @@ Rules:
   90 degrees away from the track.
 - The height scan does not see the guard rails (the policy never met walls in training): they only stop a robot
   that walks into them. Walking into a rail while upright is not a fall: the robot races on from where it is.
-- A robot whose torso touches anything restarts 1 m before the obstacle where it fell, and its clock keeps running.
-- A robot that crosses the finish line stops. The race ends when every robot has finished or the time limit is
-  reached. Finishers are ranked by time, the others by the farthest point they reached.
+- A robot whose torso touches anything has fallen: it is not reset, it stays where it fell and is out of the race
+  (DNF, ranked by the farthest point it reached).
+- A robot that crosses the finish line stops. The race ends when every robot has finished or fallen, or the time
+  limit is reached. Finishers are ranked by time, the others by the farthest point they reached.
 
 All checkpoints must come from the agent configuration of this task (same network shape). Put the checkpoints before
 `--obstacles`, which takes a list.

@@ -21,6 +21,7 @@ from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, retrieve_file_path
 
 from .race_course import RaceCourseCfg
+from .race_labels import PIXEL_FONT
 
 if TYPE_CHECKING:
     from pxr import Usd
@@ -28,18 +29,6 @@ if TYPE_CHECKING:
 # SimReady yellow guard rail, 2.79 m long (x), 0.25 m wide (y) and 1.01 m tall (z), origin at its center on the
 # ground. ``payloads/base.usda`` holds its mesh, material and collider without the asset's physics variants.
 FENCE_USD_PATH = f"{ISAAC_NUCLEUS_DIR}/SimReady/Industrial/Warehouse/Barriers/Rail_Guard_A09/payloads/base.usda"
-
-# 5 x 7 pixel letters for the banners
-PIXEL_FONT = {
-    "S": ("01111", "10000", "10000", "01110", "00001", "00001", "11110"),
-    "T": ("11111", "00100", "00100", "00100", "00100", "00100", "00100"),
-    "A": ("01110", "10001", "10001", "11111", "10001", "10001", "10001"),
-    "R": ("11110", "10001", "10001", "11110", "10100", "10010", "10001"),
-    "F": ("11111", "10000", "10000", "11110", "10000", "10000", "10000"),
-    "I": ("11111", "00100", "00100", "00100", "00100", "00100", "11111"),
-    "N": ("10001", "11001", "10101", "10011", "10001", "10001", "10001"),
-    "H": ("10001", "10001", "10001", "11111", "10001", "10001", "10001"),
-}
 
 WHITE = (0.95, 0.95, 0.95)
 BLACK = (0.05, 0.05, 0.05)

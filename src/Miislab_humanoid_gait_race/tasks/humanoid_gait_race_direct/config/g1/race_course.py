@@ -28,7 +28,7 @@ class RaceCourseCfg:
     """Distance between two fence rows [m]. With narrower lanes, a robot drifting off center sees the fences in its
     height scan (1 m wide), which the policy never met in training."""
 
-    track_length: float = 30.0
+    track_length: float = 100.0
     """Distance from the start line to the finish line [m]."""
 
     run_up: float = 3.0
@@ -58,6 +58,9 @@ class RaceCourseCfg:
 
     # obstacle parameters, ranges as in the training terrain (difficulty interpolates them)
     rough_length: float = 3.0
+    rough_fill: bool = False
+    """Rough ground from the end of the flat start to the start of the flat finish, instead of ``rough_length``.
+    Only for a course whose sole obstacle is ``rough``."""
     rough_noise_range: tuple[float, float] = (0.02, 0.10)
     rough_noise_step: float = 0.02
     stair_height_range: tuple[float, float] = (0.05, 0.23)
@@ -87,7 +90,7 @@ class RaceCourseCfg:
     def obstacle_length(self, kind: str) -> float:
         """Length of an obstacle along the track [m]."""
         if kind == "rough":
-            return self.rough_length
+            return self.track_length - self.flat_start - self.flat_finish if self.rough_fill else self.rough_length
         if kind in ("stairs_up", "stairs_down"):
             return 2 * self.stair_count * self.stair_width + self.stair_platform
         if kind == "boxes":

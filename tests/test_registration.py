@@ -28,6 +28,11 @@ def test_task_registrations():
             "env_cfg_entry_point": "Miislab_humanoid_gait_race.tasks.humanoid_gait_race_direct.config.g1.race_env_cfg:HumanoidGaitRaceTrackMidtermEnvCfg",
             "default_agent": "skrl",
         },
+        "Miislab-Humanoid-Gait-Rl-G1-Race-Midterm-Plus": {
+            "entry_point": "Miislab_humanoid_gait_race.tasks.humanoid_gait_race_direct.config.g1.race_env:HumanoidGaitRaceTrackEnv",
+            "env_cfg_entry_point": "Miislab_humanoid_gait_race.tasks.humanoid_gait_race_direct.config.g1.race_env_cfg:HumanoidGaitRaceTrackMidtermPlusEnvCfg",
+            "default_agent": "skrl",
+        },
     }
 
     for task_id, expected_values in expected.items():

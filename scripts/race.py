@@ -7,13 +7,14 @@
 
 Every checkpoint drives one G1 in its own lane; the first robot across the finish line wins. Each robot is named
 after its checkpoint file. When the races are over the simulation window closes and the final ranking is printed.
-``--task`` picks the race: ``final`` (obstacles, the default) or ``midterm`` (the same track without obstacles), or
-any task id.
+``--task`` picks the race: ``final`` (obstacles, the default), ``midterm`` (the same track without obstacles),
+``midterm-plus`` (rough ground all the way, no stairs) or any task id.
 
 .. code-block:: bash
 
     uv run python scripts/race.py models/a.pt models/b.pt models/c.pt --viz kit
     uv run python scripts/race.py models/a.pt models/b.pt --task midterm --viz kit
+    uv run python scripts/race.py models/a.pt models/b.pt --task midterm-plus --viz kit
     uv run python scripts/race.py models/a.pt models/b.pt --viz newton --difficulty 0.7 --rounds 3 --real-time
 """
 
@@ -28,6 +29,7 @@ import tempfile
 RACE_TASKS = {
     "final": "Miislab-Humanoid-Gait-Rl-G1-Race-Final",
     "midterm": "Miislab-Humanoid-Gait-Rl-G1-Race-Midterm",
+    "midterm-plus": "Miislab-Humanoid-Gait-Rl-G1-Race-Midterm-Plus",
 }
 RESULTS_FLAG = "--results_file"
 
@@ -44,7 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--task",
         type=str,
         default="final",
-        help="Race task: final (obstacles), midterm (no obstacles) or a task id.",
+        help="Race task: final (obstacles), midterm (no obstacles), midterm-plus (rough ground) or a task id.",
     )
     parser.add_argument("--agent", type=str, default=None, help="Agent configuration entry point.")
     parser.add_argument("--rounds", type=int, default=1, help="Number of races to run before exiting.")
@@ -61,6 +63,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--course_seed", type=int, default=None, help="Seed of the random obstacles.")
     parser.add_argument("--time_limit", type=float, default=None, help="Race time limit [s].")
     parser.add_argument("--speed", type=float, default=None, help="Forward-velocity command of every robot [m/s].")
+    parser.add_argument(
+        "--fixed_camera",
+        action="store_true",
+        default=False,
+        help="Keep the camera at the start instead of chasing the robots from behind.",
+    )
     parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment.")
     parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
     parser.add_argument(RESULTS_FLAG, type=str, default=None, help=argparse.SUPPRESS)
@@ -134,6 +142,8 @@ def run_race(argv: list[str]):
             env_cfg.episode_length_s = args_cli.time_limit
         if args_cli.speed is not None:
             env_cfg.race_lin_vel_x = args_cli.speed
+        if args_cli.fixed_camera:
+            env_cfg.camera_follow = False
         if args_cli.seed is not None:
             agent_cfg["seed"] = args_cli.seed
         env_cfg.seed = agent_cfg["seed"]
@@ -154,6 +164,9 @@ def run_race(argv: list[str]):
             print(f"[INFO] Loading model checkpoint from: {os.path.abspath(path)}")
             runner.agent.load(os.path.abspath(path))
             runner.agent.enable_training_mode(False, apply_to_models=True)
+            weights = [p for model in runner.agent.models.values() for p in model.parameters()]
+            if not all(torch.isfinite(p).all() for p in weights):
+                print(f"[WARNING] {path} has NaN or infinite weights: its robot will be out of the race at once")
             policies.append(runner.agent)
 
         summary = {
@@ -206,9 +219,11 @@ def print_ranking(summary: dict):
             if r["finish_time"] is not None:
                 rank = f"{medals.get(place, '  ')} {place:>2}."
                 result = f"{r['finish_time']:7.2f} s"
+            elif r["fell_at"] is not None:
+                rank, result = "   DNF", f"fell at {r['fell_at']:5.1f} m"
             else:
                 rank, result = "   DNF", f"{r['distance']:5.1f} m reached"
-            print(f"  {rank}  {r['name']:<{width}} lane {r['lane']}  {result}   falls: {r['falls']}")
+            print(f"  {rank}  {r['name']:<{width}} lane {r['lane']}  {result}")
         winner = results[0]
         print(f"  Winner: {winner['name']}" if winner["finish_time"] is not None else "  Nobody finished")
         print()

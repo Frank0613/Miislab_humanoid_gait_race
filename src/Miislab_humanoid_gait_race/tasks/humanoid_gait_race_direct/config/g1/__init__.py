@@ -47,3 +47,15 @@ gym.register(
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
     },
 )
+
+# midterm-plus: the same track with two stretches of rough ground, no stairs
+gym.register(
+    id="Miislab-Humanoid-Gait-Rl-G1-Race-Midterm-Plus",
+    entry_point=f"{__name__}.race_env:HumanoidGaitRaceTrackEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.race_env_cfg:HumanoidGaitRaceTrackMidtermPlusEnvCfg",
+        "default_agent": "skrl",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
+    },
+)
