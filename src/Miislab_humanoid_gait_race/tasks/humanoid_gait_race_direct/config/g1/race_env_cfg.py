@@ -49,7 +49,7 @@ class HumanoidGaitRaceTrackEnvCfg(HumanoidGaitRaceEnvCfg):
     """Race of G1 walking policies: every robot runs down its own lane, the first across the finish line wins."""
 
     # race time limit: the race ends when every robot has finished or after this time [s]
-    episode_length_s = 300.0
+    episode_length_s = 60.0
 
     scene: HumanoidGaitRaceTrackSceneCfg = HumanoidGaitRaceTrackSceneCfg(
         num_envs=2, env_spacing=2.5, replicate_physics=True
@@ -70,7 +70,9 @@ class HumanoidGaitRaceTrackEnvCfg(HumanoidGaitRaceEnvCfg):
     start_offset = 0.5
     reset_pose_range = {"x": (0.0, 0.0), "y": (0.0, 0.0), "yaw": (0.0, 0.0)}
 
-    # rules: a robot whose torso touches anything is out of the race, it is not reset
+    # rules: a robot that falls races on and may get up; with out_on_fall, a robot whose torso touches anything is
+    # out of the race instead, and lies where it fell
+    out_on_fall = False
     # height-scan rays this close to a fence line hit a rail, which is 0.25 m thick, and see the ground instead [m]
     rail_scan_band = 0.2
     # a torso contact within this distance of a fence line [m], with the body tilted less than this [rad], is a robot
@@ -90,6 +92,8 @@ class HumanoidGaitRaceTrackEnvCfg(HumanoidGaitRaceEnvCfg):
     camera_pitch_deg = 50.0
     camera_margin = 1.5
     camera_min_distance = 6.0
+    # robots more than this far behind the leader are left out of the picture [m]
+    camera_max_spread = 15.0
     camera_smoothing_time = 0.5  # [s]
     # field of view of the visualizer camera: Kit's default perspective camera, in a 16:9 viewport
     camera_fov_h_deg = 60.0
@@ -97,7 +101,12 @@ class HumanoidGaitRaceTrackEnvCfg(HumanoidGaitRaceEnvCfg):
     label_height = 0.9  # above the robot's root [m]
     label_pixel = 0.05  # size of one letter pixel [m], smaller for long names
     label_max_width_ratio = 0.8  # widest label, relative to the lane width
-    label_color = (1.0, 0.85, 0.1)
+    # bold glowing letters on a white plate, readable against the red-brown track
+    label_color = (1.0, 0.0, 0.0)
+    label_plate_color: tuple[float, float, float] | None = (1.0, 1.0, 1.0)
+
+    # start the next race as soon as one ends; off, the robots stay where they are until the env is reset
+    auto_restart = True
 
     def __post_init__(self) -> None:
         """Look down the track from behind the start arch, and keep the height scan below the decorations."""
@@ -127,8 +136,8 @@ class HumanoidGaitRaceTrackMidtermEnvCfg(HumanoidGaitRaceTrackEnvCfg):
 class HumanoidGaitRaceTrackMidtermPlusEnvCfg(HumanoidGaitRaceTrackEnvCfg):
     """Midterm-plus race: the same course, rough ground from start to finish, no stairs.
 
-    The ground is rougher than in the final race: bumps of 2 to 15 cm instead of 2 to 10 cm, on every metre between
+    The ground is rougher than in the final race: bumps of 2 to 20 cm instead of 2 to 10 cm, on every metre between
     the flat start and the flat finish.
     """
 
-    course: RaceCourseCfg = RaceCourseCfg(obstacles=("rough",), rough_fill=True, rough_noise_range=(0.02, 0.15))
+    course: RaceCourseCfg = RaceCourseCfg(obstacles=("rough",), rough_fill=True, rough_noise_range=(0.02, 0.20))

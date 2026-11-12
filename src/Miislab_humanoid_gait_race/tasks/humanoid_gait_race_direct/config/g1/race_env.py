@@ -31,14 +31,20 @@ class HumanoidGaitRaceTrackEnv(HumanoidGaitRaceEnv):
       place while it faces away from the track,
     * the height scan does not see the guard rails: the policy never met walls in training, and turns away from
       them, so the rails only stop a robot that walks into them,
-    * a robot whose torso touches anything (a fall) is out of the race: it is not reset, gets a zero command and
-      stays where it fell. Walking into a rail while upright is not a fall: the robot races on from where it is,
+    * a robot that falls is not reset and races on: it keeps its commands, and a policy that can get up walks on.
+      With ``out_on_fall``, a fall (the torso touching anything) puts the robot out of the race instead: it gets a
+      zero command and stays where it fell; walking into a rail while upright is not a fall,
+    * a robot whose simulation blows up (NaN, e.g. a broken checkpoint) is out of the race,
     * a robot that crosses the finish line gets a zero command and stands still,
-    * the race ends when every robot has finished or fallen, or after ``episode_length_s``. Finishers are ranked by
+    * the race ends when every robot has finished or is out, or after ``episode_length_s``. Finishers are ranked by
       time, the others by the farthest point they reached. :attr:`race_results` holds the ranking of every race.
 
     :attr:`lane_names` labels the lanes in the printed messages, e.g. with the checkpoint driving each robot, and
-    floats above each robot in the visualizers.
+    floats above each robot in the visualizers. :meth:`set_lanes` races fewer robots than there are lanes: the
+    robots of the empty lanes are parked out of sight, under the track.
+
+    With ``auto_restart`` off, the robots stay where they are once the race is over, and the next race starts at
+    the next :meth:`reset`; :meth:`end_race` ends a race early.
     """
 
     cfg: HumanoidGaitRaceTrackEnvCfg
@@ -66,18 +72,23 @@ class HumanoidGaitRaceTrackEnv(HumanoidGaitRaceEnv):
         # the labels show once the lanes are named
         self._labels: RaceLabels | None = None
         self._lane_names = [f"lane {i}" for i in range(self.num_envs)]
+        # lanes with a robot in the race; the others are parked under the track
+        self._active = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
         self.race_count = 0
         self.race_results: list[list[dict]] = []
         self._race_step = 0
         self._race_over = False
         self._finish_time = torch.full((self.num_envs,), math.nan, device=self.device)
-        # where each robot fell, NaN while it is still racing [m]
+        # where each robot went out of the race, NaN while it is still racing [m]
         self._fall_x = torch.full((self.num_envs,), math.nan, device=self.device)
+        # robots out of the race because their simulation blew up
+        self._broken = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._max_distance = torch.zeros(self.num_envs, device=self.device)
         # heading unwrapped over full turns [rad]
         self._heading = torch.zeros(self.num_envs, device=self.device)
-        # chase camera: (look-at x, distance) [m], None until the first step
+        # follow camera: (look-at x, distance) [m], None until the first step; off, the user moves the camera
         self._camera: tuple[float, float] | None = None
+        self.camera_follow = self.cfg.camera_follow
 
     @property
     def lane_names(self) -> list[str]:
@@ -91,6 +102,55 @@ class HumanoidGaitRaceTrackEnv(HumanoidGaitRaceEnv):
             if self._labels is not None:
                 self._labels.hide()
             self._labels = self._create_labels(self._lane_names)
+
+    def set_lanes(self, names: list[str]):
+        """Race one robot per name, in the first lanes; the robots of the other lanes are parked from the next reset."""
+        if not 0 < len(names) <= self.num_envs:
+            raise ValueError(f"{len(names)} robots do not fit on {self.num_envs} lanes")
+        self._active[:] = False
+        self._active[: len(names)] = True
+        self.lane_names = list(names) + ["-"] * (self.num_envs - len(names))
+
+    @property
+    def num_racers(self) -> int:
+        """Number of robots in the race."""
+        return int(self._active.sum().item())
+
+    @property
+    def race_over(self) -> bool:
+        """Whether the current race has ended."""
+        return self._race_over
+
+    def end_race(self):
+        """End the current race now, ranking the robots by where they are."""
+        if not self._race_over:
+            self._race_over = True
+            self._report_results(stopped=True)
+
+    def refresh_view(self):
+        """Move the labels and the follow camera to the robots, without stepping, e.g. while they wait at the start."""
+        root_pos = self._robot.data.root_pos_w.torch
+        if self._labels is not None:
+            self._labels.update(root_pos)
+        if self.camera_follow:
+            out = ~self._active | ~torch.isnan(self._finish_time) | ~torch.isnan(self._fall_x)
+            if bool(out.all()):
+                out = ~self._active
+            self._follow_pack(root_pos[:, 0], out)
+
+    def _park(self):
+        """Hold the robots of the empty lanes still, far under the track."""
+        parked = (~self._active).nonzero().flatten()
+        if len(parked) == 0:
+            return
+        root_pose = self._robot.data.default_root_pose.torch[parked].clone()
+        root_pose[:, 0] = -10.0
+        root_pose[:, 1] = self._terrain.env_origins[parked, 1]
+        root_pose[:, 2] = -20.0
+        self._robot.write_root_pose_to_sim_index(root_pose=root_pose, env_ids=parked)
+        self._robot.write_root_velocity_to_sim_index(
+            root_velocity=torch.zeros(len(parked), 6, device=self.device), env_ids=parked
+        )
 
     def _create_labels(self, names: list[str]) -> RaceLabels:
         # the letters face the camera: the follow camera looks along its azimuth, the fixed one from the default view
@@ -106,6 +166,7 @@ class HumanoidGaitRaceTrackEnv(HumanoidGaitRaceEnv):
             yaw=yaw,
             color=self.cfg.label_color,
             height=self.cfg.label_height,
+            plate_color=self.cfg.label_plate_color,
         )
 
     @property
@@ -129,7 +190,8 @@ class HumanoidGaitRaceTrackEnv(HumanoidGaitRaceEnv):
         # forward command: none after the finish or a fall, nor while facing away from the track, so a robot turning
         # back does not walk down the track the wrong way
         running = (
-            torch.isnan(self._finish_time)
+            self._active
+            & torch.isnan(self._finish_time)
             & torch.isnan(self._fall_x)
             & (heading_error.abs() < self.cfg.turn_in_place_angle)
         )
@@ -143,10 +205,14 @@ class HumanoidGaitRaceTrackEnv(HumanoidGaitRaceEnv):
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         died, _ = super()._get_dones()
+        if self._race_over:
+            # without auto restart, an env stepped after the race keeps its result; nobody is reset
+            return torch.zeros_like(died), torch.zeros_like(died)
         self._race_step += 1
+        self._park()
         root_pos = self._robot.data.root_pos_w.torch
         # a policy that outputs NaN (e.g. a checkpoint whose training diverged) blows up its robot's simulation
-        broken = ~torch.isfinite(root_pos).all(dim=1)
+        broken = ~torch.isfinite(root_pos).all(dim=1) & self._active
         if self._labels is not None:
             # the label of a broken robot is moved out of sight
             self._labels.update(
@@ -156,6 +222,10 @@ class HumanoidGaitRaceTrackEnv(HumanoidGaitRaceEnv):
         self._max_distance = torch.fmax(self._max_distance, x.clamp(max=self.track_length))
         finished = ~torch.isnan(self._finish_time)
         fallen = ~torch.isnan(self._fall_x)
+        died &= self._active
+        if not self.cfg.out_on_fall:
+            # a fallen robot races on: it may get up
+            died[:] = False
         # a robot that falls after the finish keeps its result; one that already fell stays out
         died &= ~finished & ~fallen
         # an upright robot next to a fence touched a rail, it did not fall
@@ -172,15 +242,18 @@ class HumanoidGaitRaceTrackEnv(HumanoidGaitRaceEnv):
         # a broken robot is out of the race too, at the farthest point it reached
         broken &= ~finished & ~fallen
         self._fall_x[broken] = self._max_distance[broken]
+        self._broken |= broken
         for i in broken.nonzero().flatten().tolist():
             print(f"[RACE] {self.lane_names[i]} produced NaN (broken checkpoint?), out of the race")
         fallen |= broken
 
-        crossed = (x >= self.track_length) & ~finished & ~fallen
+        crossed = (x >= self.track_length) & ~finished & ~fallen & self._active
         if torch.any(crossed):
             # interpolate the crossing time within the step from the distance past the line and the speed
-            speed = self._robot.data.root_lin_vel_w.torch[:, 0].clamp(min=0.1)
-            self._finish_time[crossed] = self.race_time - ((x - self.track_length) / speed)[crossed]
+            speed = torch.nan_to_num(self._robot.data.root_lin_vel_w.torch[:, 0], nan=1.0).clamp(min=0.1)
+            behind = ((x - self.track_length) / speed).clamp(max=self.step_dt)
+            # a robot that jumped far past the line in one step crossed it within that step
+            self._finish_time[crossed] = self.race_time - behind[crossed]
             self._commands[crossed, 0] = 0.0
             place = int(finished.sum().item())
             crossed_ids = crossed.nonzero().flatten().tolist()
@@ -189,24 +262,30 @@ class HumanoidGaitRaceTrackEnv(HumanoidGaitRaceEnv):
                 finish_time = self._finish_time[i].item()
                 print(f"[RACE] {self.lane_names[i]} crossed the finish line in {finish_time:.2f} s (place {place})")
 
-        if self.cfg.camera_follow:
-            self._follow_pack(x, ~torch.isnan(self._finish_time) | fallen)
+        out = ~torch.isnan(self._finish_time) | fallen | ~self._active
+        if self.camera_follow:
+            self._follow_pack(x, out)
 
-        all_done = bool(torch.all(~torch.isnan(self._finish_time) | fallen))
+        all_done = bool(torch.all(out))
         self._race_over = all_done or self._race_step >= self.max_episode_length
         if self._race_over:
             self._report_results()
-        time_out = torch.full_like(died, self._race_over)
+        time_out = torch.full_like(died, self._race_over and self.cfg.auto_restart)
         # nobody is reset before the race is over
         return torch.zeros_like(died), time_out
 
     def _follow_pack(self, x: torch.Tensor, out: torch.Tensor):
-        """Follow the robots still racing, far enough away to keep all of them, and the track, in view."""
+        """Follow the robots still racing, far enough away to keep them, and the track, in view.
+
+        Robots more than ``camera_max_spread`` behind the leader are not followed.
+        """
         if not self.sim.visualizers:
             return
         racing = [v for v, o in zip(x.tolist(), out.tolist(), strict=True) if not o and math.isfinite(v)]
         if racing:
-            x_min, x_max = min(racing), max(racing)
+            x_max = max(racing)
+            # robots too far behind the leader are left out of the picture, so the camera does not back off and off
+            x_min = min(v for v in racing if v >= x_max - self.cfg.camera_max_spread)
             target = ((x_min + x_max) / 2, self._camera_distance(x_min, x_max))
             if self._camera is None or self._race_step <= 1:
                 self._camera = target
@@ -271,14 +350,16 @@ class HumanoidGaitRaceTrackEnv(HumanoidGaitRaceEnv):
             self._race_over = False
             self._finish_time.fill_(math.nan)
             self._fall_x.fill_(math.nan)
+            self._broken[:] = False
             self._max_distance.fill_(-self.cfg.start_offset)
             self._terrain.env_origins[:, 0] = -self.cfg.start_offset
             env_ids = None
         # robots start facing down the track
         self._heading.zero_()
         super()._reset_idx(env_ids)
+        self._park()
 
-    def _report_results(self):
+    def _report_results(self, stopped: bool = False):
         """Rank the robots of the race that just ended into :attr:`race_results`."""
         self.race_count += 1
         finish_time = self._finish_time.tolist()
@@ -290,15 +371,19 @@ class HumanoidGaitRaceTrackEnv(HumanoidGaitRaceEnv):
                 "name": self.lane_names[i],
                 "finish_time": None if math.isnan(finish_time[i]) else finish_time[i],
                 "distance": distance[i],
-                "fell_at": None if math.isnan(fall_x[i]) else fall_x[i],
+                "fell_at": None if math.isnan(fall_x[i]) or self._broken[i] else fall_x[i],
+                "broken_at": fall_x[i] if self._broken[i] else None,
             }
             for i in range(self.num_envs)
+            if self._active[i]
         ]
         # finishers by time, then the others by the farthest point they reached
         results.sort(key=lambda r: (r["finish_time"] is None, r["finish_time"] or 0.0, -r["distance"]))
         self.race_results.append(results)
         winner = results[0]
-        if winner["finish_time"] is not None:
+        if stopped:
+            print(f"[RACE] Race {self.race_count} stopped after {self.race_time:.1f} s")
+        elif winner["finish_time"] is not None:
             print(f"[RACE] Race {self.race_count} over, winner: {winner['name']} ({winner['finish_time']:.2f} s)")
         else:
             print(f"[RACE] Race {self.race_count} over, nobody finished within {self.max_episode_length_s:.0f} s")

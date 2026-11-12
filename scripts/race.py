@@ -3,24 +3,48 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Race skrl checkpoints against each other on the race course.
+"""Race skrl checkpoints against each other on the race course, round after round, in one simulator window.
 
-Every checkpoint drives one G1 in its own lane; the first robot across the finish line wins. Each robot is named
-after its checkpoint file. When the races are over the simulation window closes and the final ranking is printed.
-``--task`` picks the race: ``final`` (obstacles, the default), ``midterm`` (the same track without obstacles),
-``midterm-plus`` (rough ground all the way, no stairs) or any task id.
+The rounds come from a schedule file (``schedule.json`` by default), which lists the checkpoints of every round,
+grouped in stages; a round with no checkpoint is filled in later, while the window is open:
+
+.. code-block:: json
+
+    {
+        "task": "final",
+        "lanes": 3,
+        "stages": [
+            {"name": "Stage 1", "rounds": [
+                {"name": "Round 1", "agents": ["models/a.pt", "models/b.pt", "models/c.pt"]},
+                {"name": "Round 2", "agents": ["models/d.pt", "models/e.pt"]}
+            ]},
+            {"name": "Stage 2", "rounds": [{"name": "Final", "agents": []}]}
+        ]
+    }
+
+Every checkpoint drives one G1 in its own lane, named after its checkpoint file. Each round loads its robots at
+the start and waits: in the Kit window, press **S** to start the race, **N** to go to the next round once it is over
+(or to stop a race early), and **F** to switch between the follow camera and your own camera. The result of every
+round is written to ``results/<date-time>/stage_<n>/``; the ranking of all rounds is printed when the window is closed.
+Without a Kit window (``--viz newton``, no visualizer) or with ``--auto``, the rounds run one after the other.
+
+Checkpoints on the command line race instead of the schedule, ``--rounds`` times. ``--task`` picks the race:
+``final`` (obstacles, the default), ``midterm`` (the same track without obstacles), ``midterm-plus`` (rough ground
+all the way, no stairs) or any task id.
 
 .. code-block:: bash
 
-    uv run python scripts/race.py models/a.pt models/b.pt models/c.pt --viz kit
+    uv run python scripts/race.py --viz kit
+    uv run python scripts/race.py --schedule finals.json --viz kit
     uv run python scripts/race.py models/a.pt models/b.pt --task midterm --viz kit
-    uv run python scripts/race.py models/a.pt models/b.pt --task midterm-plus --viz kit
     uv run python scripts/race.py models/a.pt models/b.pt --viz newton --difficulty 0.7 --rounds 3 --real-time
 """
 
 import argparse
+import datetime
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -32,6 +56,7 @@ RACE_TASKS = {
     "midterm-plus": "Miislab-Humanoid-Gait-Rl-G1-Race-Midterm-Plus",
 }
 RESULTS_FLAG = "--results_file"
+DEFAULT_SCHEDULE = "schedule.json"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -41,15 +66,35 @@ def build_parser() -> argparse.ArgumentParser:
     from isaaclab_rl.entrypoints.backends import cli_args_skrl
 
     parser = argparse.ArgumentParser(description="Race skrl checkpoints against each other, one robot per lane.")
-    parser.add_argument("agents", nargs="+", metavar="CHECKPOINT", help="Checkpoints to race, one lane each.")
+    parser.add_argument(
+        "agents", nargs="*", metavar="CHECKPOINT", help="Checkpoints to race, one lane each, instead of the schedule."
+    )
+    parser.add_argument(
+        "--schedule",
+        type=str,
+        default=DEFAULT_SCHEDULE,
+        help="JSON file with the checkpoints of every round, used when no checkpoint is given.",
+    )
+    parser.add_argument(
+        "--lanes",
+        type=int,
+        default=0,
+        help="Number of lanes, at least the largest round of the schedule; more leaves room for bigger rounds "
+        "written into the schedule while the window is open.",
+    )
+    parser.add_argument("--results_dir", type=str, default="results", help="Folder of the round results.")
+    parser.add_argument(
+        "--auto", action="store_true", default=False, help="Start every round at once, without waiting for S and N."
+    )
     parser.add_argument(
         "--task",
         type=str,
-        default="final",
-        help="Race task: final (obstacles), midterm (no obstacles), midterm-plus (rough ground) or a task id.",
+        default=None,
+        help="Race task: final (obstacles), midterm (no obstacles), midterm-plus (rough ground) or a task id. "
+        "Default: the schedule's task, else final.",
     )
     parser.add_argument("--agent", type=str, default=None, help="Agent configuration entry point.")
-    parser.add_argument("--rounds", type=int, default=1, help="Number of races to run before exiting.")
+    parser.add_argument("--rounds", type=int, default=1, help="Races of the checkpoints given on the command line.")
     parser.add_argument("--track_length", type=float, default=None, help="Start-to-finish distance [m].")
     parser.add_argument("--lane_width", type=float, default=None, help="Distance between fence rows [m].")
     parser.add_argument("--difficulty", type=float, default=None, help="Obstacle difficulty from 0 to 1.")
@@ -67,10 +112,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--fixed_camera",
         action="store_true",
         default=False,
-        help="Keep the camera at the start instead of chasing the robots from behind.",
+        help="Start with your own camera instead of the follow camera (F switches).",
     )
     parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment.")
-    parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+    parser.add_argument(
+        "--real-time",
+        action="store_true",
+        default=False,
+        help="Run in real-time, if possible (always, while waiting for S and N in the Kit window).",
+    )
     parser.add_argument(RESULTS_FLAG, type=str, default=None, help=argparse.SUPPRESS)
     cli_args_skrl.add_skrl_args(parser)
     add_launcher_args(parser)
@@ -82,7 +132,7 @@ def parse_agents(paths: list[str]) -> list[tuple[str, str]]:
     agents = []
     for path in paths:
         if not os.path.isfile(path):
-            raise SystemExit(f"race.py: checkpoint not found: {path}")
+            raise ValueError(f"checkpoint not found: {path}")
         agents.append((os.path.splitext(os.path.basename(path))[0], path))
     names = [name for name, _ in agents]
     return [
@@ -91,8 +141,151 @@ def parse_agents(paths: list[str]) -> list[tuple[str, str]]:
     ]
 
 
+def load_rounds(args_cli) -> tuple[list[dict], dict]:
+    """The rounds to race, ``{"name", "agents": [(name, checkpoint)]}``, and the schedule's other settings."""
+    if args_cli.agents:
+        agents = parse_agents(args_cli.agents)
+        return [
+            {"name": f"Race {i + 1}", "file": f"race_{i + 1:02d}.txt", "agents": agents} for i in range(args_cli.rounds)
+        ], {}
+    if not os.path.isfile(args_cli.schedule):
+        raise ValueError(
+            f"no checkpoint given and no schedule file {args_cli.schedule}; write one like this:\n"
+            '{"task": "final", "stages": [{"rounds": [{"agents": ["models/a.pt", "models/b.pt"]}]}]}'
+        )
+    with open(args_cli.schedule) as f:
+        try:
+            schedule = json.load(f)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"{args_cli.schedule} is not valid JSON: {e}") from e
+    base = os.path.dirname(os.path.abspath(args_cli.schedule))
+    # rounds grouped in stages, or a plain list of rounds
+    if "stages" in schedule:
+        stages = [
+            (stage.get("name", f"Stage {s + 1}"), s + 1, stage.get("rounds", []))
+            for s, stage in enumerate(schedule["stages"])
+        ]
+    else:
+        stages = [(None, 0, schedule.get("rounds", []))]
+    rounds = []
+    for stage_name, stage_number, entries in stages:
+        for i, entry in enumerate(entries):
+            # a round without checkpoints is not filled in yet, e.g. the next stage before the winners are known
+            paths = (entry.get("agents") or []) if isinstance(entry, dict) else entry
+            paths = [path if os.path.isabs(path) else os.path.relpath(os.path.join(base, path)) for path in paths]
+            name = entry.get("name", f"Round {i + 1}") if isinstance(entry, dict) else f"Round {i + 1}"
+            # result file: the round number, and the round's name unless it is just "Round <number>"
+            file = f"round_{i + 1:02d}{name_suffix(name, f'Round {i + 1}')}.txt"
+            if stage_name:
+                file = os.path.join(f"stage_{stage_number}{name_suffix(stage_name, f'Stage {stage_number}')}", file)
+                name = f"{stage_name} - {name}"
+            rounds.append({"name": name, "file": file, "agents": parse_agents(paths)})
+    if not rounds:
+        raise ValueError(f"{args_cli.schedule} has no round")
+    if not rounds[0]["agents"]:
+        raise ValueError(f"the first round of {args_cli.schedule} has no checkpoint")
+    lanes = schedule.get("lanes", 0)
+    if not isinstance(lanes, int) or lanes < 0:
+        raise ValueError(f'"lanes" of {args_cli.schedule} must be a whole number, not {lanes!r}')
+    return rounds, schedule
+
+
+class RaceKeys:
+    """Key presses in the Kit window; unavailable without Kit."""
+
+    def __init__(self, keys: tuple[str, ...]):
+        self.available = False
+        self._pressed: set[str] = set()
+        try:
+            import carb.input
+            import omni.appwindow
+
+            app_window = omni.appwindow.get_default_app_window()
+            if app_window is None:
+                return
+            self._carb = carb.input
+            self._keys = keys
+            self._input = carb.input.acquire_input_interface()
+            self._keyboard = app_window.get_keyboard()
+            self._sub = self._input.subscribe_to_keyboard_events(self._keyboard, self._on_event)
+            self.available = True
+        except Exception:
+            return
+
+    def _on_event(self, event, *args, **kwargs) -> bool:
+        if event.type == self._carb.KeyboardEventType.KEY_PRESS and event.input.name in self._keys:
+            self._pressed.add(event.input.name)
+        return True
+
+    def pop(self, key: str) -> bool:
+        """Whether ``key`` was pressed since the last call."""
+        pressed = key in self._pressed
+        self._pressed.discard(key)
+        return pressed
+
+
+class RaceHud:
+    """A small Kit window with the round, the race clock, the camera mode, the key to press and, once a round is over,
+    its ranking; nothing without Kit."""
+
+    def __init__(self):
+        self._labels = None
+        self._ranking = None
+        try:
+            import omni.ui as ui
+
+            self._ui = ui
+            self._window = ui.Window("Race", width=520, height=360)
+            with self._window.frame, ui.VStack(spacing=6):
+                self._labels = {
+                    "title": ui.Label("", height=30, style={"font_size": 24, "color": 0xFF3333FF}),
+                    "clock": ui.Label("", height=40, style={"font_size": 34}),
+                    "status": ui.Label("", height=24, style={"font_size": 18}),
+                    "camera": ui.Label("", height=24, style={"font_size": 18, "color": 0xFFAAAAAA}),
+                }
+                self._table = ui.VStack(spacing=2)
+        except Exception:
+            self._labels = None
+
+    def show(self, ranking: dict | None = None, **texts: str):
+        if self._labels is None:
+            return
+        for key, text in texts.items():
+            self._labels[key].text = text
+        if ranking is not self._ranking:
+            self._ranking = ranking
+            self._show_ranking(ranking)
+
+    def _show_ranking(self, ranking: dict | None):
+        """One row per robot: place, name, lane, result; empty while the round is not over."""
+        ui = self._ui
+        self._table.clear()
+        if ranking is None:
+            return
+        with self._table:
+            for r in ranking["results"]:
+                place, result = ranking_cells(r)
+                color = 0xFF33CCFF if r["finish_time"] is not None and r["place"] == 1 else 0xFFFFFFFF
+                with ui.HStack(height=24):
+                    for text, width in ((place, 50), (r["name"], 200), (f"lane {r['lane']}", 70), (result, 0)):
+                        style = {"font_size": 18, "color": color}
+                        if width:
+                            ui.Label(text, width=width, style=style)
+                        else:
+                            ui.Label(text, style=style)
+
+
+def slug(text: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]+", "_", text).strip("_") or "round"
+
+
+def name_suffix(name: str, default: str) -> str:
+    """``_<name>`` for a file name, nothing for the default name."""
+    return "" if name == default else f"_{slug(name)}"
+
+
 def run_race(argv: list[str]):
-    """Run the races in the simulator, writing the results to the ``--results_file`` after every race."""
+    """Race the rounds in the simulator, writing every round's result and the ``--results_file`` after it."""
     import contextlib
     import copy
     import time
@@ -117,8 +310,12 @@ def run_race(argv: list[str]):
 
     args_cli, hydra_args = setup_preset_cli(build_parser(), fuse_kit_args(argv))
     set_hydra_args(hydra_args)
-    args_cli.task = RACE_TASKS.get(args_cli.task, args_cli.task)
-    agents = parse_agents(args_cli.agents)
+    try:
+        rounds, schedule = load_rounds(args_cli)
+    except ValueError as e:
+        raise SystemExit(f"race.py: {e}") from e
+    task_name = args_cli.task or schedule.get("task") or "final"
+    args_cli.task = RACE_TASKS.get(task_name, task_name)
 
     check_skrl_version()
     agent_cfg_entry_point = resolve_skrl_agent_cfg_entry_point(args_cli.agent, args_cli.algorithm)
@@ -127,8 +324,10 @@ def run_race(argv: list[str]):
     with launch_simulation(env_cfg, args_cli), contextlib.ExitStack() as cleanup:
         runner_cls = import_skrl_runner(args_cli.ml_framework)
         apply_env_overrides(args_cli, env_cfg)
-        # one lane per checkpoint
-        env_cfg.scene.num_envs = len(agents)
+        # one lane per robot of the largest round; smaller rounds leave the last lanes empty
+        # lanes: as many as asked for (--lanes, else the schedule's "lanes"), and at least the largest round
+        lanes = args_cli.lanes or schedule.get("lanes", 0)
+        env_cfg.scene.num_envs = max(lanes, *(len(r["agents"]) for r in rounds))
         course = env_cfg.course
         for option in ("track_length", "lane_width", "difficulty"):
             if getattr(args_cli, option) is not None:
@@ -142,8 +341,8 @@ def run_race(argv: list[str]):
             env_cfg.episode_length_s = args_cli.time_limit
         if args_cli.speed is not None:
             env_cfg.race_lin_vel_x = args_cli.speed
-        if args_cli.fixed_camera:
-            env_cfg.camera_follow = False
+        # the robots stay where they are after a race, until the next round is loaded
+        env_cfg.auto_restart = False
         if args_cli.seed is not None:
             agent_cfg["seed"] = args_cli.seed
         env_cfg.seed = agent_cfg["seed"]
@@ -151,95 +350,232 @@ def run_race(argv: list[str]):
         env = gym.make(args_cli.task, cfg=env_cfg)
         cleanup.callback(lambda: close_env(env))
         race = env.unwrapped
-        race.lane_names = [name for name, _ in agents]
+        race.camera_follow = not args_cli.fixed_camera
         env = SkrlVecEnvWrapper(env, ml_framework=args_cli.ml_framework)
 
-        # one skrl agent per checkpoint, all built from the same agent configuration
+        # one skrl agent per checkpoint, all built from the same agent configuration, loaded once
         agent_cfg["trainer"]["close_environment_at_exit"] = False
         agent_cfg["agent"]["experiment"]["write_interval"] = 0
         agent_cfg["agent"]["experiment"]["checkpoint_interval"] = 0
-        policies = []
-        for _, path in agents:
-            runner = runner_cls(env, copy.deepcopy(agent_cfg))
-            print(f"[INFO] Loading model checkpoint from: {os.path.abspath(path)}")
-            runner.agent.load(os.path.abspath(path))
-            runner.agent.enable_training_mode(False, apply_to_models=True)
-            weights = [p for model in runner.agent.models.values() for p in model.parameters()]
-            if not all(torch.isfinite(p).all() for p in weights):
-                print(f"[WARNING] {path} has NaN or infinite weights: its robot will be out of the race at once")
-            policies.append(runner.agent)
+        policies = {}
 
-        summary = {
-            "agents": [{"lane": i, "name": name, "checkpoint": path} for i, (name, path) in enumerate(agents)],
-            "track_length": course.track_length,
-            "obstacles": list(course.obstacles),
-            "difficulty": course.difficulty,
-            "races": [],
-        }
-        print(f"[RACE] {len(agents)} robots, {course.track_length:.0f} m, time limit {race.max_episode_length_s:.0f} s")
+        def load_policy(path: str):
+            if path not in policies:
+                runner = runner_cls(env, copy.deepcopy(agent_cfg))
+                print(f"[INFO] Loading model checkpoint from: {os.path.abspath(path)}")
+                runner.agent.load(os.path.abspath(path))
+                runner.agent.enable_training_mode(False, apply_to_models=True)
+                weights = [p for model in runner.agent.models.values() for p in model.parameters()]
+                if not all(torch.isfinite(p).all() for p in weights):
+                    print(f"[WARNING] {path} has NaN or infinite weights: its robot will be out of the race at once")
+                policies[path] = runner.agent
+            return policies[path]
+
+        results_dir = os.path.join(args_cli.results_dir, datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+        summary = {"task": task_name, "track_length": course.track_length, "obstacles": list(course.obstacles)}
+        summary.update(difficulty=course.difficulty, results_dir=results_dir, rounds=[])
+        limit = race.max_episode_length_s
+        length = course.track_length
+        print(f"[RACE] {len(rounds)} round(s), {race.num_envs} lanes, {length:.0f} m, time limit {limit:.0f} s")
         print(f"[RACE] obstacles: {', '.join(course.obstacles) or 'none'} (difficulty {course.difficulty:.2f})")
-        for i, (name, path) in enumerate(agents):
-            print(f"[RACE]   lane {i}: {name} ({path})")
 
-        obs, _ = env.reset()
-        states = env.state()
+        def save_round(round_cfg: dict, stopped: bool):
+            results = [{"place": place, **r} for place, r in enumerate(race.race_results[-1], start=1)]
+            rnd = {"name": round_cfg["name"], "stopped_early": stopped, "results": results}
+            path = os.path.join(results_dir, round_cfg["file"])
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write("\n".join(format_round(rnd)) + "\n")
+            print(f"[RACE] results of {round_cfg['name']} written to {path}")
+            summary["rounds"].append(rnd)
+            with open(args_cli.results_file, "w") as f:
+                json.dump(summary, f)
+
+        def schedule_mtime() -> float | None:
+            if args_cli.agents or not os.path.isfile(args_cli.schedule):
+                return None
+            return os.path.getmtime(args_cli.schedule)
+
+        schedule_seen = schedule_mtime()
+
+        def reload_rounds(current: list[dict]) -> list[dict]:
+            """The rounds of the schedule file as it is now; the current ones if it did not change or is broken."""
+            nonlocal schedule_seen
+            mtime = schedule_mtime()
+            if mtime is None or mtime == schedule_seen:
+                return current
+            schedule_seen = mtime
+            try:
+                new_rounds, new_schedule = load_rounds(args_cli)
+            except ValueError as e:
+                print(f"[RACE] {args_cli.schedule} not reloaded, keeping the rounds as they were: {e}")
+                return current
+            print(f"[RACE] {args_cli.schedule} reloaded: {len(new_rounds)} round(s)")
+            new_task = new_schedule.get("task")
+            new_lanes = new_schedule.get("lanes", 0)
+            if new_lanes != schedule.get("lanes", 0) and not args_cli.lanes:
+                print(f"[RACE] the lanes changed to {new_lanes}: that takes a restart, the track keeps {race.num_envs}")
+            if new_task is not None and RACE_TASKS.get(new_task, new_task) != args_cli.task:
+                print(f"[RACE] the task changed to {new_task}: that takes a restart, the track stays {task_name}")
+            return new_rounds
+
+        def load_round(index: int):
+            """Put the robots of round ``index`` at the start; None if they do not fit on the track."""
+            round_cfg = rounds[index]
+            if not round_cfg["agents"]:
+                print(f"[RACE] {round_cfg['name']} has no checkpoint yet: fill it in the schedule, then press N")
+                return None
+            if len(round_cfg["agents"]) > race.num_envs:
+                print(
+                    f"[RACE] {round_cfg['name']} has {len(round_cfg['agents'])} robots, the track only "
+                    f"{race.num_envs} lanes: fix the schedule (or restart with --lanes)"
+                )
+                return None
+            lane_policies = [load_policy(path) for _, path in round_cfg["agents"]]
+            race.set_lanes([name for name, _ in round_cfg["agents"]])
+            print(f"[RACE] {round_cfg['name']} ({index + 1}/{len(rounds)}):")
+            for lane, (name, path) in enumerate(round_cfg["agents"]):
+                print(f"[RACE]   lane {lane}: {name} ({path})")
+            # the skrl wrapper resets the env only once, unless told otherwise
+            env._reset_once = True
+            obs, _ = env.reset()
+            race.refresh_view()
+            return round_cfg, lane_policies, obs, env.state()
+
+        keys = RaceKeys(("S", "N", "F"))
+        interactive = keys.available and not args_cli.auto
+        hud = RaceHud()
+        if interactive:
+            print("[RACE] keys in the Isaac Sim window: S start, N next round (or stop the race), F camera")
+
+        index = 0
+        loaded = load_round(index)
+        round_cfg, lane_policies, obs, states = loaded
+        state = "waiting"
         dt = race.step_dt
+        sim = race.sim
+        last_hud = last_check = 0.0
         with contextlib.suppress(KeyboardInterrupt), torch.inference_mode():
-            while race.race_count < args_cli.rounds:
+            while sim.is_running():
                 start_time = time.time()
-                actions = torch.zeros(env.num_envs, *env.action_space.shape, device=env.device)
-                for lane, policy in enumerate(policies):
-                    sampled, outputs = policy.act(obs, states, timestep=0, timesteps=0)
-                    actions[lane] = outputs.get("mean_actions", sampled)[lane]
-                obs, _, _, _, _ = env.step(actions)
-                states = env.state()
-                if len(race.race_results) > len(summary["races"]):
-                    summary["races"] = list(race.race_results)
-                    with open(args_cli.results_file, "w") as f:
-                        json.dump(summary, f)
+                if keys.pop("F"):
+                    race.camera_follow = not race.camera_follow
+                    print(f"[RACE] camera: {'follow' if race.camera_follow else 'free, yours to move'}")
+                # the schedule may be edited while the window is open: read it again when it changes
+                if state != "racing" and time.time() - last_check > 0.5:
+                    last_check = time.time()
+                    rounds = reload_rounds(rounds)
+                    if state == "waiting" and index < len(rounds) and rounds[index] != round_cfg:
+                        # the round waiting at the start was changed: load it again
+                        loaded = load_round(index)
+                        if loaded is not None:
+                            round_cfg, lane_policies, obs, states = loaded
+
+                if state == "waiting":
+                    if not interactive or keys.pop("S"):
+                        print(f"[RACE] {round_cfg['name']}: go!")
+                        state = "racing"
+                    else:
+                        race.refresh_view()
+                        sim.render()
+                elif state == "racing":
+                    stopped = interactive and keys.pop("N")
+                    if stopped:
+                        race.end_race()
+                    else:
+                        actions = torch.zeros(env.num_envs, *env.action_space.shape, device=env.device)
+                        for lane, policy in enumerate(lane_policies):
+                            sampled, outputs = policy.act(obs, states, timestep=0, timesteps=0)
+                            actions[lane] = outputs.get("mean_actions", sampled)[lane]
+                        obs, _, _, _, _ = env.step(actions)
+                        states = env.state()
+                    if race.race_over:
+                        save_round(round_cfg, stopped)
+                        state = "over"
+                        if index + 1 >= len(rounds):
+                            print("[RACE] that was the last round of the schedule; add rounds and press N, or close")
+                elif state == "over":
+                    if not interactive or keys.pop("N"):
+                        rounds = reload_rounds(rounds)
+                        if index + 1 < len(rounds):
+                            loaded = load_round(index + 1)
+                            if loaded is not None:
+                                index += 1
+                                round_cfg, lane_policies, obs, states = loaded
+                                state = "waiting"
+                            elif not interactive:
+                                break
+                        elif not sim.visualizers or not interactive:
+                            break
+                        else:
+                            print(f"[RACE] the schedule has no round {index + 2}; add one and press N again")
+                    if state == "over":
+                        race.refresh_view()
+                        sim.render()
+
+                if time.time() - last_hud > 0.2:
+                    last_hud = time.time()
+                    if state == "waiting":
+                        status = f"{race.num_racers} robots at the start - press S to start"
+                    elif state == "racing":
+                        status = "racing - N stops the race now"
+                    elif index + 1 < len(rounds):
+                        status = f"race over, results saved - press N for {rounds[index + 1]['name']}"
+                    else:
+                        status = "last round over - add rounds to the schedule, or close the window"
+                    camera = "follow" if race.camera_follow else "free (yours to move)"
+                    ranking = summary["rounds"][-1] if state == "over" and summary["rounds"] else None
+                    hud.show(
+                        ranking=ranking,
+                        title=f"{round_cfg['name']}  ({index + 1}/{len(rounds)})",
+                        clock=f"{race.race_time:5.1f} / {race.max_episode_length_s:.0f} s",
+                        status=status,
+                        camera=f"camera: {camera} - F switches",
+                    )
+
                 sleep_time = dt - (time.time() - start_time)
-                if args_cli.real_time and sleep_time > 0:
+                # a watched race runs at real speed, so its clock matches the wall clock
+                if (args_cli.real_time or interactive or state != "racing") and sleep_time > 0:
                     time.sleep(sleep_time)
 
 
+MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
+
+
+def ranking_cells(r: dict) -> tuple[str, str]:
+    """Place (``1.``, or ``DNF``) and result of one robot."""
+    if r["finish_time"] is not None:
+        return f"{r['place']}.", f"{r['finish_time']:.2f} s"
+    if r.get("broken_at") is not None:
+        return "DNF", f"out (NaN) at {r['broken_at']:.1f} m"
+    if r["fell_at"] is not None:
+        return "DNF", f"fell at {r['fell_at']:.1f} m"
+    return "DNF", f"{r['distance']:.1f} m reached"
+
+
+def format_round(rnd: dict) -> list[str]:
+    """Lines of the ranking of one round."""
+    width = max(len(r["name"]) for r in rnd["results"]) + 2
+    lines = [rnd["name"] + ("  (stopped early)" if rnd["stopped_early"] else "")]
+    for r in rnd["results"]:
+        place, result = ranking_cells(r)
+        rank = f"{MEDALS.get(r['place'], '  ')} {place:>3}" if place != "DNF" else "   DNF"
+        result = f"{result:>9}" if r["finish_time"] is not None else f"{result:>15}"
+        lines.append(f"  {rank}  {r['name']:<{width}} lane {r['lane']}  {result}")
+    return lines
+
+
 def print_ranking(summary: dict):
-    """Print the ranking of every race and, after several races, the overall standings."""
-    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-    races = summary["races"]
-    width = max(len(agent["name"]) for agent in summary["agents"]) + 2
+    """Print the ranking of every round."""
     print()
     print("=" * 60)
     obstacles = ", ".join(summary["obstacles"]) or "none"
     print(f"🏁  RACE RESULTS  🏁   {summary['track_length']:.0f} m, obstacles: {obstacles}")
     print("=" * 60)
-    for number, results in enumerate(races, start=1):
-        if len(races) > 1:
-            print(f"Race {number}")
-        for place, r in enumerate(results, start=1):
-            if r["finish_time"] is not None:
-                rank = f"{medals.get(place, '  ')} {place:>2}."
-                result = f"{r['finish_time']:7.2f} s"
-            elif r["fell_at"] is not None:
-                rank, result = "   DNF", f"fell at {r['fell_at']:5.1f} m"
-            else:
-                rank, result = "   DNF", f"{r['distance']:5.1f} m reached"
-            print(f"  {rank}  {r['name']:<{width}} lane {r['lane']}  {result}")
-        winner = results[0]
-        print(f"  Winner: {winner['name']}" if winner["finish_time"] is not None else "  Nobody finished")
+    for rnd in summary["rounds"]:
+        print("\n".join(format_round(rnd)))
         print()
-
-    if len(races) > 1:
-        standings = []
-        for agent in summary["agents"]:
-            places = [next(p for p, r in enumerate(res, 1) if r["lane"] == agent["lane"]) for res in races]
-            wins = sum(1 for res in races if res[0]["lane"] == agent["lane"] and res[0]["finish_time"] is not None)
-            standings.append((agent["name"], wins, sum(places) / len(places)))
-        standings.sort(key=lambda s: (-s[1], s[2]))
-        print(f"Overall after {len(races)} races")
-        for place, (name, wins, mean_place) in enumerate(standings, start=1):
-            rank = f"{medals.get(place, '  ')} {place:>2}."
-            print(f"  {rank}  {name:<{width}} wins: {wins}   average place: {mean_place:.1f}")
-        print()
+    print(f"Round results: {summary['results_dir']}/")
 
 
 def main():
