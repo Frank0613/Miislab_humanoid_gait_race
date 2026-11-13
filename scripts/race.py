@@ -240,10 +240,9 @@ class RaceKeys:
             self._pressed.add(event.input.name)
         return True
 
-    def pop(self, key: str) -> bool:
-        """Whether ``key`` was pressed since the last call."""
-        pressed = key in self._pressed
-        self._pressed.discard(key)
+    def take(self) -> set[str]:
+        """The keys pressed since the last call; a key not used right away is dropped, not kept for later."""
+        pressed, self._pressed = self._pressed, set()
         return pressed
 
 
@@ -477,7 +476,10 @@ def run_race(argv: list[str]):
         with contextlib.suppress(KeyboardInterrupt), torch.inference_mode():
             while sim.is_running():
                 start_time = time.time()
-                if keys.pop("F"):
+                # keys pressed since the last step, used now or never: an S pressed during a race must not start
+                # the next one, an N pressed at the start must not stop the race once it runs
+                pressed = keys.take() if interactive else set()
+                if "F" in pressed:
                     race.camera_follow = not race.camera_follow
                     print(f"[RACE] camera: {'follow' if race.camera_follow else 'free, yours to move'}")
                 # the schedule may be edited while the window is open: read it again when it changes
@@ -490,7 +492,7 @@ def run_race(argv: list[str]):
                         if loaded is not None:
                             round_cfg, lane_policies, obs, states = loaded
 
-                if interactive and keys.pop("R") and state != "waiting":
+                if "R" in pressed and state != "waiting":
                     # race the current round again, as the schedule has it now; its new result replaces the old one
                     if state == "racing":
                         race.end_race()
@@ -504,14 +506,14 @@ def run_race(argv: list[str]):
                         state = "over"
 
                 if state == "waiting":
-                    if not interactive or keys.pop("S"):
+                    if not interactive or "S" in pressed:
                         print(f"[RACE] {round_cfg['name']}: go!")
                         state = "racing"
                     else:
                         race.refresh_view()
                         sim.render()
                 elif state == "racing":
-                    stopped = interactive and keys.pop("N")
+                    stopped = "N" in pressed
                     if stopped:
                         race.end_race()
                     else:
@@ -527,7 +529,7 @@ def run_race(argv: list[str]):
                         if index + 1 >= len(rounds):
                             print("[RACE] that was the last race of the schedule; add groups and press N, or close")
                 elif state == "over":
-                    if not interactive or keys.pop("N"):
+                    if not interactive or "N" in pressed:
                         rounds = reload_rounds(rounds)
                         if index + 1 < len(rounds):
                             loaded = load_round(index + 1)
