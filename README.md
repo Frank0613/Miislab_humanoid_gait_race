@@ -36,145 +36,101 @@ uv run isaaclab list_envs
 # 6. the checkpoints to race go in models/ (git-ignored), then race
 mkdir -p models
 cp /path/to/*.pt models/
-# list the checkpoints of every round in schedule.json (see Race), then
+# write schedule.json (see Race), then
 uv run python scripts/race.py --viz kit
 ```
 
-The first `uv sync` downloads several GB. The first Isaac Sim start asks you to accept the NVIDIA Omniverse EULA; set
-`OMNI_KIT_ACCEPT_EULA=YES` to accept it without the prompt. The first race also downloads the guard rail and other
-SimReady assets and caches them. If Isaac Lab lives somewhere else, change the paths in `[tool.uv.sources]` and run
-`uv lock` before `uv sync`.
+- First `uv sync` downloads several GB
+- `OMNI_KIT_ACCEPT_EULA=YES` skips the EULA prompt
+- Isaac Lab elsewhere: edit `[tool.uv.sources]`, then `uv lock`
 
 ## Race
 
-`scripts/race.py` puts one G1 per checkpoint in its own lane of a straight 100 m course. Yellow SimReady guard rails
-(`Rail_Guard_A09`) separate the lanes; the robots start under a red and white arch with a START banner, which widens
-with the number of lanes, and finish on a checkered line under a FINISH gantry. Between start and finish, every lane
-crosses the same obstacles, made like the training terrain: random rough ground, stairs up, boxes, stairs down and a
-slope. Each robot is named after its checkpoint file, and the name floats above it in the visualizer, in bold red
-letters on a white plate.
+100 m straight track, one G1 per checkpoint, one lane each. Name label above each robot = checkpoint file name.
 
-### Race day: rounds from a schedule
+| Task (`--task`) | Track |
+| --- | --- |
+| `final` (default) | rough, stairs up, boxes, stairs down, slope |
+| `midterm` | flat |
+| `midterm-plus` | rough all the way (bumps 2-20 cm), no stairs |
 
-Write the race day in `schedule.json` at the project root: stages of rounds, one list of checkpoints per round
-(paths relative to the file). Rounds can have different numbers of robots. A round with an empty `agents` list is
-not filled in yet, e.g. the next stage before the winners of the current one are known: fill it in while the window
-is open (see below). `name` can be left out: stages are then called `Stage 1`, `Stage 2`, ... and rounds `Round 1`,
-`Round 2`, ... within their stage. A plain `"rounds": [...]` list without stages works too.
+### Schedule (`schedule.json`)
 
 ```json
 {
-  "task": "final",
+  "task": "midterm",
   "lanes": 3,
-  "stages": [
-    {
-      "name": "Stage 1",
-      "rounds": [
-        {"name": "Round 1", "agents": ["models/a.pt", "models/b.pt", "models/c.pt"]},
-        {"name": "Round 2", "agents": ["models/d.pt", "models/e.pt"]}
-      ]
-    },
-    {
-      "name": "Stage 2",
-      "rounds": [
-        {"name": "Final", "agents": []}
-      ]
-    }
+  "rounds": [
+    [
+      ["a", "b", "c"],
+      ["d", "e"]
+    ],
+    [
+      []
+    ]
   ]
 }
 ```
 
-Then start one Isaac Sim window for the whole day:
+- `rounds`: list of rounds → each round a list of groups → each group the checkpoints racing together
+- Names map to `models/<name>.pt` (`a` or `a.pt`); a name with a folder is a path
+- Numbered automatically: `Round 1 - Group 1`, `Round 1 - Group 2`, ...
+- `[]` or `""` = not filled in yet; winners are written in by hand
+- `lanes`: number of lanes; a bigger group wins. Fixed at startup
+- Editable while running: saved changes load on the next `N` / `R`. `task` and `lanes` need a restart
+
+### Run
 
 ```bash
 uv run python scripts/race.py --viz kit
-uv run python scripts/race.py --schedule other_schedule.json --viz kit
+uv run python scripts/race.py --schedule schedule-plus.json --viz kit
 ```
-
-Each round loads its robots at the start and waits. Click into the Isaac Sim window, then press:
 
 | Key | Action |
 | --- | --- |
-| `S` | start the race |
-| `N` | after the race: load the next round. During the race: stop it now and record the standings |
-| `F` | switch between the follow camera (default) and your own camera (mouse, as usual in Isaac Sim) |
+| `S` | start |
+| `N` | next group (during a race: stop and score now) |
+| `R` | race the current group again; new result overwrites the old |
+| `F` | follow camera ↔ free camera |
 
-The schedule can be edited while the window is open; it is read again whenever the file is saved. A change to the
-round waiting at the start reloads its robots at once; `N` loads the next round as it is in the file at that moment,
-so rounds can be changed or added until they start (rounds already raced keep their results). `"lanes"` sets the number of
-lanes; a round with more robots than that gets one lane per robot instead (without `"lanes"`, the track has as many
-lanes as the largest round). The lanes are fixed when the window opens, so set `"lanes"` high enough for rounds
-written in later; `--lanes` on the command line overrides it. A schedule saved half-written (invalid JSON, a missing checkpoint) is reported in the
-terminal and the rounds stay as they were. The task cannot change without a restart.
-
-Each round lasts at most 60 s (`--time_limit`): then it is scored, finishers by time and the others by the farthest
-point they reached, and the robots stay where they are until `N`. While the window waits for keys the race runs at
-real speed. A small *Race* window shows the round, the race clock (e.g. `23.4 / 60 s`), what to press next and the
-camera mode (follow or free). The result of every round is written as soon as the race ends, one file per round in a folder per stage:
-`results/<date>-<time>/stage_1/round_01.txt`, `stage_1/round_02.txt`, ..., `stage_2/round_01.txt` (a stage or round
-with its own name gets it in the file name, e.g. `stage_2/round_01_Final.txt`), as a short ranking:
+- 60 s per race, then scored: finishers by time, others by distance
+- Race window: group, clock, next key, camera mode, ranking
+- Results: `results/<date>-<time>/round_<n>/group_<m>.txt`
 
 ```text
-Stage 1 - Round 1
+Round 1 - Group 1
   🥇  1.  pon             lane 0   112.97 s
      DNF  jasper          lane 2   77.6 m reached
-     DNF  my_best_agent   lane 1   19.2 m reached
 ```
 
-After the last round the window stays open; close it to print the
-ranking of every round in the terminal. With `--auto`, or without a Kit window
-(`--viz newton`, no `--viz`), the rounds run one after the other without waiting for keys.
-
-### Quick races from the command line
-
-Checkpoints given on the command line race instead of the schedule, `--rounds` times.
-
-There are three races on the same track: the final (`--task final`, the default) with the obstacles, the midterm
-(`--task midterm`) without them, a straight sprint on flat ground, and the midterm-plus (`--task midterm-plus`) with
-rough ground over the whole track, bumpier than the final's (2-20 cm instead of 2-10 cm), and no stairs.
-
-```bash
-uv run python scripts/race.py models/a.pt models/b.pt models/c.pt --viz kit
-uv run python scripts/race.py models/a.pt models/b.pt --task midterm --viz kit
-uv run python scripts/race.py models/a.pt models/b.pt --task midterm-plus --viz kit
-uv run python scripts/race.py models/a.pt models/b.pt --viz newton --difficulty 0.7 --rounds 3 --real-time
-uv run python scripts/race.py models/a.pt models/b.pt --obstacles        # flat track
-uv run python scripts/race.py models/a.pt models/b.pt --obstacles stairs_up stairs_up slope
-```
+### Options
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--schedule` | `schedule.json` | rounds to race when no checkpoint is given |
-| `--lanes` | the schedule's `lanes`, else the largest round | number of lanes, at least the largest round |
-| `--results_dir` | `results` | folder of the round results, one sub-folder per run |
-| `--auto` | off | start every round at once, without waiting for `S` and `N` |
-| `--task` | the schedule's `task`, else `final` | `final` (obstacles), `midterm` (flat track), `midterm-plus` (rough all the way) or a task id |
-| `--difficulty` | 0.4 | obstacle difficulty from 0 to 1, as the training terrain levels (stairs 5-23 cm, boxes 5-20 cm, slopes 0-0.4) |
-| `--obstacles` | `rough stairs_up boxes stairs_down slope` (final), none (midterm), `rough` over the whole track (midterm-plus) | obstacles from start to finish; none for a flat track |
-| `--course_seed` | 0 | seed of the random rough ground and boxes |
-| `--track_length` | 100 | start-to-finish distance [m] |
-| `--lane_width` | 3.0 | distance between guard rails [m] |
-| `--time_limit` | 60 | race time limit [s]: the race is scored when it runs out |
-| `--speed` | 1.0 | forward-velocity command of every robot [m/s] |
-| `--rounds` | 1 | races of the checkpoints given on the command line |
-| `--fixed_camera` | off | start with your own camera; by default the camera follows the robots from the side, looking down, and keeps the robots still racing in view, except those more than 15 m behind the leader (`camera_max_spread`; `F` switches) |
+| `--schedule` | `schedule.json` | schedule file |
+| `--lanes` | schedule's `lanes` | number of lanes |
+| `--models_dir` | `models` | folder for bare names |
+| `--results_dir` | `results` | results folder |
+| `--auto` | off | no keys, races run back to back |
+| `--task` | schedule's `task`, else `final` | `final` / `midterm` / `midterm-plus` |
+| `--time_limit` | 60 | seconds per race |
+| `--speed` | 1.0 | forward command [m/s] |
+| `--difficulty` | 0.4 | obstacle difficulty 0-1 |
+| `--obstacles` | per task | obstacle list; empty = flat |
+| `--course_seed` | 0 | seed of rough ground and boxes |
+| `--track_length` | 100 | [m] |
+| `--lane_width` | 3.0 | [m] |
+| `--fixed_camera` | off | start with the free camera |
 
-Rules:
+### Rules
 
-- Every robot gets the same forward command and the same target heading, straight down the track toward the finish
-  line; a robot that drifts sideways is not steered back to its lane center. A robot that turned away is always
-  steered back the way it came, so it does not spin on in full circles, and turns in place while it faces more than
-  90 degrees away from the track.
-- The height scan does not see the guard rails (the policy never met walls in training): they only stop a robot
-  that walks into them. Walking into a rail while upright is not a fall: the robot races on from where it is.
-- A robot that falls is not reset and is not out: it keeps its commands, and a policy that can get up races on.
-  A robot whose simulation blows up (NaN, a broken checkpoint) is out. (`out_on_fall = True` in `race_env_cfg.py`
-  brings back the old rule: a fall puts the robot out, and it lies where it fell.)
-- A robot that crosses the finish line stops. The race ends when every robot has finished, or the time
-  limit is reached. Finishers are ranked by time, the others by the farthest point they reached.
-
-All checkpoints must come from the agent configuration of this task (same network shape). Put the checkpoints before
-`--obstacles`, which takes a list.
+- Same command for every robot: 1.0 m/s forward, heading straight at the finish
+- Start: lane center, 0.5 m behind the line, facing the finish
+- Facing > 90° away: no forward command, turns back in place
+- Falling does not end the race; the robot may get up (`out_on_fall = True` to disqualify)
+- Simulation blow-up (NaN) = out
+- Guard rails are invisible to the height scan; they only block
+- All checkpoints must share this task's network shape
 
 ## Run the tasks
 

@@ -1,26 +1,13 @@
 {
   "task": "midterm",
   "lanes": 3,
-  "stages": [
-    {
-      "name": "Stage 1",
-      "rounds": [
-        {"name": "Round 1", "agents": ["models/-1.pt", "models/0.pt", "models/31.pt"]},
-        {"name": "Round 1", "agents": ["models/agent.pt", "models/6666.pt"]},
-        {"name": "Round 2", "agents": ["models/22.pt", "models/23.pt"]},
-        {"name": "Round 1", "agents": ["models/agent.pt","models/6666.pt"]},
-        {"name": "Round 3", "agents": ["models/sean.pt", "models/17.pt"]},
-        {"name": "Round 1", "agents": ["models/agent.pt","models/6666.pt"]},
-        {"name": "Round 1", "agents": ["models/agent.pt","models/6666.pt"]}
-
-      ]
-    },
-    {
-      "name": "Stage 2",
-      "rounds": [
-        {"name": "Round 1", "agents": ["models/14.pt", "models/sean.pt", "models/final_model.pt"]},
-        {"name": "Round 2", "agents": ["models/jasper.pt", "models/AlexLai_agent_v3.pt", "models/young.pt"]}
-      ]
-    }
+  "rounds": [
+    [
+      ["", "", ""]
+    ],
+    [
+      ["", "", ""],
+      ["", "", ""]
+    ]
   ]
 }

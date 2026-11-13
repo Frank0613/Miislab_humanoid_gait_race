@@ -5,28 +5,34 @@
 
 """Race skrl checkpoints against each other on the race course, round after round, in one simulator window.
 
-The rounds come from a schedule file (``schedule.json`` by default), which lists the checkpoints of every round,
-grouped in stages; a round with no checkpoint is filled in later, while the window is open:
+The races come from a schedule file (``schedule.json`` by default): a list of rounds, each a list of groups, each
+group the checkpoints that race together. Rounds and groups are numbered in order (``Round 1 - Group 1``, ...), and a
+group with no checkpoint is filled in later, while the window is open, e.g. with the winners of the round before. A
+checkpoint is the name of a file in ``models/`` (``a`` or ``a.pt`` is ``models/a.pt``), or a path with a folder in
+it:
 
 .. code-block:: json
 
     {
         "task": "final",
         "lanes": 3,
-        "stages": [
-            {"name": "Stage 1", "rounds": [
-                {"name": "Round 1", "agents": ["models/a.pt", "models/b.pt", "models/c.pt"]},
-                {"name": "Round 2", "agents": ["models/d.pt", "models/e.pt"]}
-            ]},
-            {"name": "Stage 2", "rounds": [{"name": "Final", "agents": []}]}
+        "rounds": [
+            [
+                ["a", "b", "c"],
+                ["d", "e"]
+            ],
+            [
+                []
+            ]
         ]
     }
 
-Every checkpoint drives one G1 in its own lane, named after its checkpoint file. Each round loads its robots at
-the start and waits: in the Kit window, press **S** to start the race, **N** to go to the next round once it is over
-(or to stop a race early), and **F** to switch between the follow camera and your own camera. The result of every
-round is written to ``results/<date-time>/stage_<n>/``; the ranking of all rounds is printed when the window is closed.
-Without a Kit window (``--viz newton``, no visualizer) or with ``--auto``, the rounds run one after the other.
+Every checkpoint drives one G1 in its own lane, named after its checkpoint file. Each group loads its robots at
+the start and waits: in the Kit window, press **S** to start the race, **N** to go to the next group once it is over
+(or to stop a race early), **R** to race the current group again (its new result replaces the old one), and **F** to
+switch between the follow camera and your own camera. The result of every group is written to
+``results/<date-time>/round_<n>/group_<m>.txt``; the ranking of all races is printed when the window is closed.
+Without a Kit window (``--viz newton``, no visualizer) or with ``--auto``, the races run one after the other.
 
 Checkpoints on the command line race instead of the schedule, ``--rounds`` times. ``--task`` picks the race:
 ``final`` (obstacles, the default), ``midterm`` (the same track without obstacles), ``midterm-plus`` (rough ground
@@ -36,7 +42,7 @@ all the way, no stairs) or any task id.
 
     uv run python scripts/race.py --viz kit
     uv run python scripts/race.py --schedule finals.json --viz kit
-    uv run python scripts/race.py models/a.pt models/b.pt --task midterm --viz kit
+    uv run python scripts/race.py a b --task midterm --viz kit
     uv run python scripts/race.py models/a.pt models/b.pt --viz newton --difficulty 0.7 --rounds 3 --real-time
 """
 
@@ -44,7 +50,6 @@ import argparse
 import datetime
 import json
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -83,6 +88,9 @@ def build_parser() -> argparse.ArgumentParser:
         "written into the schedule while the window is open.",
     )
     parser.add_argument("--results_dir", type=str, default="results", help="Folder of the round results.")
+    parser.add_argument(
+        "--models_dir", type=str, default="models", help="Folder of the checkpoints named without a folder."
+    )
     parser.add_argument(
         "--auto", action="store_true", default=False, help="Start every round at once, without waiting for S and N."
     )
@@ -127,10 +135,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def parse_agents(paths: list[str]) -> list[tuple[str, str]]:
+def checkpoint_path(entry: str, base: str, models_dir: str) -> str:
+    """Path of a checkpoint: a bare name is a file in ``models_dir`` (``.pt`` added if missing), else a path.
+
+    Relative paths and ``models_dir`` are relative to ``base``.
+    """
+    if not isinstance(entry, str) or not entry:
+        raise ValueError(f"a checkpoint is a file name, not {entry!r}")
+    if not os.path.isabs(entry) and not os.path.dirname(entry):
+        entry = os.path.join(models_dir, entry if entry.endswith(".pt") else f"{entry}.pt")
+    return entry if os.path.isabs(entry) else os.path.relpath(os.path.join(base, entry))
+
+
+def parse_agents(entries: list[str], base: str, models_dir: str) -> list[tuple[str, str]]:
     """``(name, checkpoint)`` of every checkpoint, named after its file name, with unique names."""
     agents = []
-    for path in paths:
+    # an empty name is a slot not filled in yet
+    for entry in (entry for entry in entries if entry != ""):
+        path = checkpoint_path(entry, base, models_dir)
         if not os.path.isfile(path):
             raise ValueError(f"checkpoint not found: {path}")
         agents.append((os.path.splitext(os.path.basename(path))[0], path))
@@ -144,14 +166,14 @@ def parse_agents(paths: list[str]) -> list[tuple[str, str]]:
 def load_rounds(args_cli) -> tuple[list[dict], dict]:
     """The rounds to race, ``{"name", "agents": [(name, checkpoint)]}``, and the schedule's other settings."""
     if args_cli.agents:
-        agents = parse_agents(args_cli.agents)
+        agents = parse_agents(args_cli.agents, os.getcwd(), args_cli.models_dir)
         return [
             {"name": f"Race {i + 1}", "file": f"race_{i + 1:02d}.txt", "agents": agents} for i in range(args_cli.rounds)
         ], {}
     if not os.path.isfile(args_cli.schedule):
         raise ValueError(
             f"no checkpoint given and no schedule file {args_cli.schedule}; write one like this:\n"
-            '{"task": "final", "stages": [{"rounds": [{"agents": ["models/a.pt", "models/b.pt"]}]}]}'
+            '{"task": "final", "rounds": [[["a", "b"]]]}'
         )
     with open(args_cli.schedule) as f:
         try:
@@ -159,31 +181,32 @@ def load_rounds(args_cli) -> tuple[list[dict], dict]:
         except json.JSONDecodeError as e:
             raise ValueError(f"{args_cli.schedule} is not valid JSON: {e}") from e
     base = os.path.dirname(os.path.abspath(args_cli.schedule))
-    # rounds grouped in stages, or a plain list of rounds
-    if "stages" in schedule:
-        stages = [
-            (stage.get("name", f"Stage {s + 1}"), s + 1, stage.get("rounds", []))
-            for s, stage in enumerate(schedule["stages"])
-        ]
-    else:
-        stages = [(None, 0, schedule.get("rounds", []))]
+    # a list of rounds, each a list of groups, each group a list of checkpoints; a round written as one list of
+    # checkpoints is a round of one group
+    schedule_rounds = schedule.get("rounds")
+    if not isinstance(schedule_rounds, list):
+        raise ValueError(f'{args_cli.schedule} needs "rounds": a list of rounds, each a list of groups')
     rounds = []
-    for stage_name, stage_number, entries in stages:
-        for i, entry in enumerate(entries):
-            # a round without checkpoints is not filled in yet, e.g. the next stage before the winners are known
-            paths = (entry.get("agents") or []) if isinstance(entry, dict) else entry
-            paths = [path if os.path.isabs(path) else os.path.relpath(os.path.join(base, path)) for path in paths]
-            name = entry.get("name", f"Round {i + 1}") if isinstance(entry, dict) else f"Round {i + 1}"
-            # result file: the round number, and the round's name unless it is just "Round <number>"
-            file = f"round_{i + 1:02d}{name_suffix(name, f'Round {i + 1}')}.txt"
-            if stage_name:
-                file = os.path.join(f"stage_{stage_number}{name_suffix(stage_name, f'Stage {stage_number}')}", file)
-                name = f"{stage_name} - {name}"
-            rounds.append({"name": name, "file": file, "agents": parse_agents(paths)})
+    for r, groups in enumerate(schedule_rounds, start=1):
+        if not isinstance(groups, list):
+            raise ValueError(f"round {r} of {args_cli.schedule} must be a list of groups, not {groups!r}")
+        if groups and all(isinstance(group, str) for group in groups):
+            groups = [groups]
+        for g, group in enumerate(groups, start=1):
+            # a group without checkpoints is not filled in yet, e.g. before the winners of the round before are known
+            if not isinstance(group, list):
+                raise ValueError(f"round {r} of {args_cli.schedule}: a group is a list of checkpoints, not {group!r}")
+            rounds.append(
+                {
+                    "name": f"Round {r} - Group {g}",
+                    "file": os.path.join(f"round_{r}", f"group_{g:02d}.txt"),
+                    "agents": parse_agents(group, base, args_cli.models_dir),
+                }
+            )
     if not rounds:
-        raise ValueError(f"{args_cli.schedule} has no round")
+        raise ValueError(f"{args_cli.schedule} has no group to race")
     if not rounds[0]["agents"]:
-        raise ValueError(f"the first round of {args_cli.schedule} has no checkpoint")
+        raise ValueError(f"the first group of {args_cli.schedule} has no checkpoint")
     lanes = schedule.get("lanes", 0)
     if not isinstance(lanes, int) or lanes < 0:
         raise ValueError(f'"lanes" of {args_cli.schedule} must be a whole number, not {lanes!r}')
@@ -273,15 +296,6 @@ class RaceHud:
                             ui.Label(text, width=width, style=style)
                         else:
                             ui.Label(text, style=style)
-
-
-def slug(text: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_-]+", "_", text).strip("_") or "round"
-
-
-def name_suffix(name: str, default: str) -> str:
-    """``_<name>`` for a file name, nothing for the default name."""
-    return "" if name == default else f"_{slug(name)}"
 
 
 def run_race(argv: list[str]):
@@ -376,7 +390,7 @@ def run_race(argv: list[str]):
         summary.update(difficulty=course.difficulty, results_dir=results_dir, rounds=[])
         limit = race.max_episode_length_s
         length = course.track_length
-        print(f"[RACE] {len(rounds)} round(s), {race.num_envs} lanes, {length:.0f} m, time limit {limit:.0f} s")
+        print(f"[RACE] {len(rounds)} race(s), {race.num_envs} lanes, {length:.0f} m, time limit {limit:.0f} s")
         print(f"[RACE] obstacles: {', '.join(course.obstacles) or 'none'} (difficulty {course.difficulty:.2f})")
 
         def save_round(round_cfg: dict, stopped: bool):
@@ -387,7 +401,12 @@ def run_race(argv: list[str]):
             with open(path, "w") as f:
                 f.write("\n".join(format_round(rnd)) + "\n")
             print(f"[RACE] results of {round_cfg['name']} written to {path}")
-            summary["rounds"].append(rnd)
+            # a round raced again replaces its earlier result
+            done = [i for i, r in enumerate(summary["rounds"]) if r["name"] == rnd["name"]]
+            if done:
+                summary["rounds"][done[0]] = rnd
+            else:
+                summary["rounds"].append(rnd)
             with open(args_cli.results_file, "w") as f:
                 json.dump(summary, f)
 
@@ -408,9 +427,9 @@ def run_race(argv: list[str]):
             try:
                 new_rounds, new_schedule = load_rounds(args_cli)
             except ValueError as e:
-                print(f"[RACE] {args_cli.schedule} not reloaded, keeping the rounds as they were: {e}")
+                print(f"[RACE] {args_cli.schedule} not reloaded, keeping the races as they were: {e}")
                 return current
-            print(f"[RACE] {args_cli.schedule} reloaded: {len(new_rounds)} round(s)")
+            print(f"[RACE] {args_cli.schedule} reloaded: {len(new_rounds)} race(s)")
             new_task = new_schedule.get("task")
             new_lanes = new_schedule.get("lanes", 0)
             if new_lanes != schedule.get("lanes", 0) and not args_cli.lanes:
@@ -442,11 +461,11 @@ def run_race(argv: list[str]):
             race.refresh_view()
             return round_cfg, lane_policies, obs, env.state()
 
-        keys = RaceKeys(("S", "N", "F"))
+        keys = RaceKeys(("S", "N", "R", "F"))
         interactive = keys.available and not args_cli.auto
         hud = RaceHud()
         if interactive:
-            print("[RACE] keys in the Isaac Sim window: S start, N next round (or stop the race), F camera")
+            print("[RACE] keys in the Isaac Sim window: S start, N next race (or stop), R race again, F camera")
 
         index = 0
         loaded = load_round(index)
@@ -471,6 +490,19 @@ def run_race(argv: list[str]):
                         if loaded is not None:
                             round_cfg, lane_policies, obs, states = loaded
 
+                if interactive and keys.pop("R") and state != "waiting":
+                    # race the current round again, as the schedule has it now; its new result replaces the old one
+                    if state == "racing":
+                        race.end_race()
+                    rounds = reload_rounds(rounds)
+                    loaded = load_round(index) if index < len(rounds) else None
+                    if loaded is not None:
+                        round_cfg, lane_policies, obs, states = loaded
+                        state = "waiting"
+                        print(f"[RACE] {round_cfg['name']} again: press S to start")
+                    elif state == "racing":
+                        state = "over"
+
                 if state == "waiting":
                     if not interactive or keys.pop("S"):
                         print(f"[RACE] {round_cfg['name']}: go!")
@@ -493,7 +525,7 @@ def run_race(argv: list[str]):
                         save_round(round_cfg, stopped)
                         state = "over"
                         if index + 1 >= len(rounds):
-                            print("[RACE] that was the last round of the schedule; add rounds and press N, or close")
+                            print("[RACE] that was the last race of the schedule; add groups and press N, or close")
                 elif state == "over":
                     if not interactive or keys.pop("N"):
                         rounds = reload_rounds(rounds)
@@ -508,7 +540,7 @@ def run_race(argv: list[str]):
                         elif not sim.visualizers or not interactive:
                             break
                         else:
-                            print(f"[RACE] the schedule has no round {index + 2}; add one and press N again")
+                            print("[RACE] the schedule has no race after this one; add a group and press N again")
                     if state == "over":
                         race.refresh_view()
                         sim.render()
@@ -518,11 +550,11 @@ def run_race(argv: list[str]):
                     if state == "waiting":
                         status = f"{race.num_racers} robots at the start - press S to start"
                     elif state == "racing":
-                        status = "racing - N stops the race now"
+                        status = "racing - N stops the race now, R starts it over"
                     elif index + 1 < len(rounds):
-                        status = f"race over, results saved - press N for {rounds[index + 1]['name']}"
+                        status = f"race over, results saved - N: {rounds[index + 1]['name']}, R: race again"
                     else:
-                        status = "last round over - add rounds to the schedule, or close the window"
+                        status = "last race over - R races it again; add groups, or close the window"
                     camera = "follow" if race.camera_follow else "free (yours to move)"
                     ranking = summary["rounds"][-1] if state == "over" and summary["rounds"] else None
                     hud.show(
